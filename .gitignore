@@ -1,9 +1,31 @@
-node_modules/
-.next/
-.vercel/
+# dependencies
+/node_modules
+
+# next.js / build
+/.next/
+/out/
+/build
+*.tsbuildinfo
+next-env.d.ts
+
+# testing
+/coverage
+/test-results/
+/playwright-report/
+
+# env files: secrets live in Vercel env vars (CLAUDE.md rule 8)
 .env*
 !.env.example
-# user layer: personal data, never commit (see CLAUDE.md rule 7)
+
+# vercel
+.vercel
+
+# misc
+.DS_Store
+*.pem
+npm-debug.log*
+
+# user layer: personal data, never commit (CLAUDE.md rule 7)
 /profile/
 /seed/
 *.xlsx
