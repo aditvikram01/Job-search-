@@ -1,0 +1,310 @@
+# Outreach Desk
+
+Context file for Claude Code. Read this whole file before planning or writing code.
+
+## 1. What we are building
+
+A private web app that runs Rasleen Kaur Dua's tech-law job search end to end:
+
+1. **Discover and merge.** Search the web for people and opportunities, and merge them into one master roster that exports to Excel.
+2. **First outreach.** Send (or draft) a tailored first email with her CV attached.
+3. **Follow up.** Follow up on email and LinkedIn on a fixed cadence until the person replies, then drop them out of the queue.
+
+- **Owner / builder:** Aditya (Bengaluru).
+- **User:** Rasleen Kaur Dua, final-year B.A. LL.B. (Hons.), RGNUL Punjab, targeting TMT / technology law and legal tech.
+- **Hosting:** Vercel. Two users only (Aditya and Rasleen). Nothing public.
+- **Status:** greenfield. A prototype exists as a claude.ai artifact ("The Outreach Desk") with 17 seeded contacts and 5 opportunities. Seed data: `seed/Outreach-Desk.xlsx`. Her proof points: `profile/inventory.md`.
+
+Patterns borrowed from `santifer/career-ops` (open source, Claude Code based job-search system): a user layer vs system layer split, a single tracker as source of truth, and strict "never fabricate" rules. Read its `CLAUDE.md` for reference before designing the profile/inventory handling. Check its license before copying code.
+
+## 2. Feasibility, stated plainly
+
+| Piece | Feasible? | How |
+|---|---|---|
+| Web discovery of firms, partners, associates, founders, opportunities | Yes | Search APIs + page extraction + Claude for structuring |
+| Work emails of partners/associates | Mostly | Firm profile pages first, then Hunter.io finder, then verified patterns. Some will stay unknown |
+| LinkedIn profile URLs | Yes | From search engine results (Exa / SerpAPI). Never by crawling linkedin.com |
+| Warm-lead flagging (worked with / alumni) | Yes | "Worked with" from `inventory.md`; alumni from search snippets, marked unverified until confirmed |
+| Send emails from her Gmail with CV attached | Yes | Gmail API over OAuth |
+| Draft-for-review mode | Yes | Gmail drafts + an in-app review queue |
+| Email follow-ups with reply detection | Yes | Scheduled jobs + Gmail thread checks |
+| LinkedIn connection requests / DMs sent automatically | **No, not safely** | No official API for this. Automation breaks LinkedIn's User Agreement and risks restricting her account. Build **assisted** mode instead (see 6.2) |
+
+## 3. Hard rules for anyone (human or agent) working in this repo
+
+1. **Never invent an email address.** Every stored address carries `status` (`verified | found | pattern | unknown`), `source_url`, and `checked_at`. Auto-send only goes to `verified` or `found` addresses. `pattern` addresses can only become drafts.
+2. **Never scrape or automate linkedin.com.** No headless browsers against LinkedIn, no cookie-session libraries. LinkedIn URLs come only from search APIs or manual entry.
+3. **Never fabricate experience.** Every claim in a generated message must trace to a line in `profile/inventory.md`. The writer stores which inventory items it used on the touch record. The critic rejects drafts with ungrounded claims.
+4. **Auto-send is off by default.** Per-contact opt-in. The first 10 messages ever sent go through the review queue regardless of setting.
+5. **Send caps.** Max 25 emails/day, max 1 message per person per 72 hours, Monday to Friday only, 09:30 to 18:00 in the recipient's timezone (default IST).
+6. **Suppression is permanent.** Anyone who replies "no", unsubscribes, or bounces hard goes to the suppression list and is never contacted again by any path.
+7. **User layer vs system layer.** Personal data (`profile/`, `seed/`, DB rows) is never overwritten by code changes. Customisations go to the user layer, never into shared code.
+   **This GitHub repo is public.** `profile/` and `seed/` are gitignored and must never be committed. They hold her phone number, email, CV facts and contacts. In production the inventory, CV and seed live in the DB and Vercel Blob and are uploaded through Settings. Locally, keep them in the gitignored folders. Commit only `profile.example/` with fake data for tests.
+8. **No secrets in the repo.** Use Vercel environment variables. `.env.local` is gitignored.
+
+## 4. Stack
+
+| Concern | Choice | Why |
+|---|---|---|
+| App | Next.js (App Router, TypeScript) | Native to Vercel |
+| DB | Postgres (Neon or Supabase) + Drizzle ORM | Relational data, easy migrations |
+| Auth | Auth.js with Google provider, email allowlist of 2 | Same Google login also grants Gmail scopes |
+| Background jobs + schedules | Inngest (or Trigger.dev) | Vercel functions time out on long crawls; Vercel Cron on Hobby only fires once a day. Inngest gives retries, steps, and delayed follow-ups |
+| LLM | Anthropic TypeScript SDK | Sonnet-class model for drafting, Haiku-class for extraction and classification |
+| Web search | Exa (people + company search) and/or SerpAPI | Finds LinkedIn URLs and pages without touching LinkedIn |
+| Page extraction | Firecrawl API (self-host alternative: Crawl4AI) | Turns firm team pages and job boards into clean markdown |
+| Email finding + verification | Hunter.io (Domain Search, Email Finder, Email Verifier) | Has a small free tier; verification protects her sender reputation |
+| Excel | exceljs | Import, merge, export the 3-sheet workbook |
+| File storage | Vercel Blob | Her CV PDF and versions |
+| Email sending | Gmail API (`googleapis`) | Sends as her, lands in her Sent folder, threads correctly |
+| Tests | Vitest (unit), Playwright (e2e) | |
+
+## 5. Data model (Postgres)
+
+**organizations**: id, name, type (`law_firm | legal_tech | think_tank | regulator | other`), website, domain, city, country, practice_tags[], careers_url, email_pattern (+ confidence).
+
+**people**: id, org_id, name, role, seniority (`partner | associate | counsel | founder | other`), arena (`tech_law | legal_tech`), linkedin_url, warm_type (`worked_with | alumni | alumni_unverified | course | event | none`), warm_note, hook (one specific line about their work), focus (short phrase used in follow-ups), stage, dedupe_key, source_urls[], created_at, updated_at.
+
+**emails**: id, person_id, address, status (`verified | found | pattern | unknown`), source_url, verifier_result, checked_at.
+
+**opportunities**: id, title, org_id or org_name, type (`internship | vacation_scheme | scholarship | fellowship | invitation_programme | job | clerkship`), arena, location, deadline (real date or null), deadline_text, url, source, note, first_seen_at, archived.
+
+**sequences**: id, person_id, mode (`auto | review | manual`), status (`active | replied | exhausted | stopped | suppressed`), started_at, next_touch_at, touch_count.
+
+**touches**: id, sequence_id, channel (`email | linkedin`), kind (`first | follow_up`), n, scheduled_for, status (`scheduled | drafted | awaiting_review | sent | skipped | failed`), subject, body, inventory_refs[], gmail_draft_id, gmail_message_id, gmail_thread_id, sent_at.
+
+**suppression**: address or person_id, reason, created_at.
+
+**settings**: profile (name, phone, email, signature), cadences[] (see 6.3), default cadence ids (global / per arena), caps, send window, active CV blob id, inventory markdown (editable in-app, versioned).
+
+`sequences` also stores `cadence_id` and a `cadence_snapshot` (JSON). Editing a cadence later never silently changes a running sequence.
+
+**Stages** on `people.stage`: `new → queued → drafted → sent → following_up → replied → meeting → closed`, plus `do_not_contact`.
+
+**Dedupe key:** lowercased name + org domain. Merge rule on import: never overwrite a non-empty human-edited field with a machine-found one; keep both and flag a conflict.
+
+## 6. Features
+
+### 6.1 Action item 1: Discover and merge
+
+Three pipelines, each runnable on demand ("Run now") and on a schedule (daily for opportunities, weekly for people).
+
+**1a. TMT law firms (India first).**
+- Seed firm list lives in `config/firms.yml` (user layer). Start with: Trilegal, Nishith Desai Associates, JSA, Shardul Amarchand Mangaldas, Cyril Amarchand Mangaldas, AZB & Partners, Khaitan & Co, IndusLaw, Ikigai Law, Saraf and Partners, Spice Route Legal, Lakshmikumaran & Sridharan, Saikrishna & Associates, Anand and Anand, Economic Laws Practice, S&R Associates, Samvad Partners, Argus Partners.
+- For each firm: find the TMT / technology / data protection / telecom / fintech practice page, extract partners, counsel and senior associates with role and profile URL.
+- Emails: (1) firm profile page, (2) Hunter Email Finder, (3) firm pattern from confirmed addresses, then Hunter Email Verifier. Record status honestly.
+- LinkedIn: search-API query like `"<name>" "<firm>" site:linkedin.com/in`. Store the URL only if name and firm both match the snippet.
+- Warm leads:
+  - `worked_with`: anyone listed under "People she has worked with" in `profile/inventory.md`, plus anyone on those same teams she names later.
+  - `alumni`: search snippets showing Rajiv Gandhi National University of Law / RGNUL. Store as `alumni_unverified` until she confirms.
+  - Warm leads sort first everywhere and are highlighted in the Excel export.
+
+**1b. Legal-tech founders.**
+- Sources: curated directories (for example the eCourtsIndia legaltech directory), Tracxn/Crunchbase-style listings via search, company About/Team pages, founder interviews.
+- Capture founder name, company, what the product does (one line), website, public contact email, LinkedIn URL, a candidate hook.
+
+**1c. Opportunities.**
+- Types: internships, vacation schemes, scholarships, fellowships, invitation programmes, clerkships, early-career roles in tech law.
+- Seed sources in `config/sources.yml`: Lawctopus, LiveLaw, Bar and Bench (jobs/internships), SCC Online blog, LawCareers.Net and TargetJobs Law (UK schemes), firm careers pages from `firms.yml`, policy bodies such as Vidhi Centre for Legal Policy and CCG at NLU Delhi. Prefer RSS or structured pages over browser automation.
+- Deadlines: only a real date parsed from the page. Otherwise `deadline_text` like "Rolling". Never guess.
+- Auto-archive once the deadline has passed.
+
+**Excel.** One workbook, three sheets: `TMT Firms`, `Legal Tech Founders`, `Opportunities`. Import merges by dedupe key (section 5). Export regenerates on demand. Warm leads get a fill colour. Seed format: `seed/Outreach-Desk.xlsx`.
+
+### 6.2 Action item 2: First outreach
+
+Three modes, chosen per contact or per batch from the roster (multi-select):
+
+| Mode | Behaviour |
+|---|---|
+| **Auto** | Generate, run critic, send via Gmail with CV attached. Allowed only for `verified` / `found` emails and after the first-10 review rule |
+| **Review** | Generate, run critic, create a Gmail draft, add to in-app Review Queue. She edits and clicks Send (app sends via API) or sends from Gmail |
+| **Manual** | Generate text only. She copies and sends however she likes, then marks it sent |
+
+**Message generation.**
+- Inputs: person, org, hook, arena, `profile/inventory.md`, her writing samples (`profile/voice/` once added).
+- Tech-law firms: formal ("Dear Mr/Ms <surname>"), 150 to 200 words, leads with the specific hook, then 2 or 3 relevant proof points, then a clear ask (internship / role / 15-minute call), CV attached.
+- Legal-tech founders: warmer ("Hi <first name>"), 100 to 150 words, leads with their product, then builder-side proof points (Rhett hackathon win, Harvey vs Legora SLA tracker, CS50 for Lawyers, publications), ask for a short call.
+- Subject lines: specific, under 70 characters, no clickbait.
+- Critic pass (second LLM call): checks every claim against inventory, checks tone and length, checks nothing embarrassing (wrong name, wrong firm, stale title). Fails closed.
+
+**LinkedIn (assisted, not automated).**
+- For each contact with a LinkedIn URL, generate a connection note (under 300 characters) and a post-connect message.
+- The LinkedIn queue shows: profile link (opens in a new tab), the note with a Copy button, and buttons "Sent request", "Accepted", "Messaged".
+- Follow-ups on LinkedIn only start once she marks "Accepted".
+- Optional adapter interface `LinkedInSender` with only a manual implementation. If a third-party session API (for example Unipile) is ever added, it sits behind a feature flag that is off by default, with a written warning about account risk. Do not build it in v1.
+
+### 6.3 Action item 3: Follow-ups
+
+**Cadence is configurable. Nothing about it is hard-coded.**
+
+- **Shape of a cadence** (stored as JSON in `settings.cadences[]`, validated with zod):
+  ```ts
+  type Cadence = {
+    id: string; name: string;          // "Standard", "Gentle", or her own
+    offsets_days: number[];            // days after the FIRST touch, strictly increasing, e.g. [7, 14, 31]
+    repeat_every_days: number | null;  // after the last offset, keep going every N days; null = stop
+    max_touches: number | null;        // total follow-ups; null = until reply (UI shows a warning)
+    channels: ('email' | 'linkedin')[];
+  };
+  ```
+- **Presets shipped** (user can edit, duplicate, delete, or build her own):
+  | Preset | Offsets | Then | Max |
+  |---|---|---|---|
+  | Gentle | 7, 21 | stop | 2 |
+  | Standard (default) | 7, 14, 31 | every 31 days (62, 93, ...) | 6 |
+  | Until reply | 7, 14, 31 | every 31 days | none (warning shown) |
+- **Where it is set, most general to most specific:** global default → per arena (TMT firms vs legal-tech founders) → per batch (chosen when queueing from the roster) → per contact (override on the contact page). The most specific wins.
+- **Editor UX:** chips for each day offset (tap to edit, "+" to add), a "then repeat every [31] days" toggle, a max-touches stepper, and a live **timeline preview** that shows real calendar dates for "if you send today" after weekend/send-window shifting.
+- **Changing a cadence** affects only touches not yet scheduled. A prompt asks "Also apply to N active sequences?" and recomputes their future touches if she says yes.
+- **Math lives in `lib/outreach/cadence.ts` as a pure function** `nextTouchAt(cadence, firstTouchAt, touchesSent, now, window)` and is covered by unit tests: offsets, repeat, cap, null cap, weekend and send-window shifts, OOO push, and the 72-hour spacing rule.
+- **Exit the queue when:** any reply arrives on the thread or from that address; hard bounce; the reply contains an opt-out; she stops it manually; max touches reached.
+- **Out-of-office replies** do not exit. Parse a return date when present and push the next touch past it.
+- **Email follow-ups** are sent as replies in the same Gmail thread (same subject, `In-Reply-To` / `References` headers), each shorter than the last and adding something new (a recent piece of work, a publication, a relevant development). Never guilt-trip.
+- **Arena-specific copy:** formal and brief for firms; lighter for founders.
+- **Mode inheritance:** a follow-up uses the sequence's mode (auto / review / manual). Review-mode follow-ups land in the Review Queue on their due date.
+- **LinkedIn follow-ups** use the same cadence, starting from "Accepted". On the due date they appear in the LinkedIn Queue with the message ready to copy. She marks "Replied" by hand, because LinkedIn replies cannot be detected (rule 2).
+- **Reply detection:** daily job lists active threads via Gmail API and checks for inbound messages. Later upgrade: Gmail `users.watch` with Pub/Sub push.
+
+## 7. Gmail integration details
+
+- OAuth scopes: `openid email profile`, `gmail.send`, `gmail.compose` (drafts), `gmail.readonly` (reply detection). `gmail.readonly` is a restricted scope.
+- Google Cloud project setup for two users:
+  - An app in "Testing" status expires refresh tokens after 7 days, so she would re-login weekly.
+  - Moving it to "In production" without verification works for a small number of users but shows an "unverified app" warning at login. Acceptable for a private 2-person tool. Full verification (and a security assessment for restricted scopes) is only needed if this ever goes public.
+- **Open question:** is `rgnul.ac.in` on Google Workspace? If so, the university admin may block third-party OAuth apps. Fallback: send from a personal Gmail with her university address in the signature.
+- Store refresh tokens encrypted at rest (AES-GCM with a key in env).
+- Respect Gmail sending limits; our own cap (25/day) is far below them.
+- Every sent email includes a short opt-out line in the signature ("If you'd rather I didn't follow up, just reply and say so.").
+
+## 8. Compliance notes (keep brief, keep in mind)
+
+- India (DPDP Act 2023): the Act carves out personal data made publicly available by the person or under a legal obligation. Firm profile pages and public founder pages are the primary sources for that reason. Store only what the tool needs, and honour deletion requests.
+- UK/EU contacts: GDPR and (UK) PECR apply to cold email. Keep it one-to-one, relevant to the person's role, low volume, with the opt-out line.
+- LinkedIn User Agreement prohibits bots and scraping. See rule 2.
+
+## 9. Agents
+
+The deployed app cannot run Claude Code. At runtime, each pipeline stage is plain TypeScript that calls the Claude API with a stage-specific system prompt. Keep those prompts in `prompts/*.md` so they are versioned and testable.
+
+**Runtime stages (prompts in `prompts/`):**
+
+| Stage | Job |
+|---|---|
+| `scout` | Turn search results and page markdown into candidate people / orgs / opportunities (structured JSON) |
+| `enricher` | Fill role, seniority, practice tags, hook, focus |
+| `verifier` | Dedupe, flag stale or conflicting data, decide email status from verifier output |
+| `warm-matcher` | Match against `inventory.md` worked-with list and alumni signals |
+| `writer` | Draft first messages and follow-ups in her voice, returning `inventory_refs` |
+| `critic` | Reject ungrounded claims, wrong names, wrong tone, over-length |
+
+**Dev-time Claude Code subagents (`.claude/agents/`):**
+- `architect`: plans each phase against this file before code is written.
+- `integration-engineer`: Gmail, Inngest, Hunter, Exa, Firecrawl clients with mocks.
+- `test-writer`: cadence math, dedupe, status transitions, Gmail threading.
+- `security-reviewer`: OAuth token handling, allowlist, secrets, rule 2 compliance.
+- `copy-reviewer`: reads sample drafts against `inventory.md` and rules 3 and 5.
+
+- `ux-reviewer`: walks each screen at 390px width against section 10 (plain words, empty states, one-tap actions).
+
+**Open-source building blocks for development** (check each license before copying; record the source and license at the top of any adapted file):
+
+| Source | Use it for |
+|---|---|
+| `santifer/career-ops` | Patterns: user/system layer, single tracker, never-fabricate rules, the scoring/tailoring flow |
+| `wshobson/agents`, `VoltAgent/awesome-claude-code-subagents` | Starting points for the subagents above (Next.js, TypeScript, security, test automation) |
+| `anthropics/skills` | `xlsx` (workbook conventions), `webapp-testing` (Playwright checks of our UI), `frontend-design` (UI polish), `skill-creator` (to write project skills) |
+| Exa MCP | Dev-time research: firm lists, sources, prompt tuning on real search output |
+| Playwright MCP | Driving our own app to verify flows. Never pointed at linkedin.com |
+| Context7 MCP (or similar) | Current docs for Next.js, Auth.js, Drizzle, Inngest, Gmail API |
+
+**Project skills to create in `.claude/skills/`** (small, repo-specific):
+- `add-firm`: add a firm to `config/firms.yml` and run the 1a pipeline on it only.
+- `tune-prompt`: run a `prompts/*.md` stage against fixtures in `tests/fixtures/` and diff the output.
+- `cadence-check`: print the schedule a cadence would produce from a given start date.
+- `release`: typecheck, lint, test, `vercel deploy --prebuilt` to preview, then smoke-test.
+
+## 10. UI
+
+**Design principle: she should never need to read docs.** Plain words, not system terms. Say "Waiting for reply", not `following_up`. Say "Email found on firm site", not `status=found`. Every destructive or outbound action has an undo or a confirm.
+
+- **First-run setup wizard** (5 steps, skippable, resumable): 1) Connect Gmail (explains the "unverified app" screen with a screenshot), 2) Upload CV, 3) Paste or confirm inventory, 4) Pick a follow-up preset (with the timeline preview), 5) Import the seed Excel. Ends on the Today screen.
+- **Today (home):** one screen, three counters with one-tap entry: "N drafts to review", "N LinkedIn steps", "N new opportunities". Below: replies received (the good news first), then upcoming follow-ups for the next 7 days.
+- **Roster:** tabs for TMT Firms / Legal Tech / All; filters for warm, stage, email status, city; warm leads pinned on top with a badge. Multi-select opens one **"Start outreach"** sheet: choose mode (Auto / Review / Just write it), choose cadence (preset dropdown + "customise"), preview the first draft, confirm. Other bulk actions: Pause, Stop, Mark replied, Export selected.
+- **Contact page:** a timeline of every touch (email and LinkedIn), email with a status badge and its source link, a cadence override, and Pause / Stop / Do-not-contact.
+- **Review Queue:** swipeable cards on mobile. Draft on the left, the inventory items it used on the right (tap to see the line). Buttons: Send, Edit, Regenerate, Skip, Stop sequence. Keyboard shortcuts on desktop.
+- **LinkedIn Queue:** the assisted flow from 6.2. One card per step, an "Open profile" button, a copy button, one tap to mark done.
+- **Follow-ups:** a calendar or list of what is due and why ("Touch 3 of 6, Standard cadence"). Drag a touch to reschedule it.
+- **Opportunities:** cards with type, deadline badge (red within 7 days), and source. Archive; "Draft cover email" button.
+- **Settings:** profile, signature, CV upload (versioned), inventory editor, **cadences** (editor from 6.3), caps and send window, connected Google account with a re-connect button, suppression list.
+- **Import / Export:** Excel in and out, with a dry-run preview ("12 new, 3 updated, 1 conflict") before anything is written.
+- **Notifications:** an optional daily digest email to her, "3 replies, 5 drafts waiting".
+
+Mobile-first. She will mostly review on her phone. Use shadcn/ui + Tailwind. Every list has an empty state that says what to do next.
+
+## 11. Build phases and acceptance criteria
+
+**Phase 0: Foundation.** Repo, Next.js, Drizzle, Neon/Supabase, Auth.js with a 2-email allowlist, Vercel deploy.
+Done when: both users can log in on the Vercel URL; anyone else is refused. Also set up `.claude/agents/` and `.claude/skills/` (section 9) in this phase.
+
+**Phase 1: Roster + Excel.** Tables, roster UI, import of `seed/Outreach-Desk.xlsx`, export of the 3-sheet workbook, merge rules.
+Done when: importing the seed twice creates no duplicates, and an edited field survives re-import.
+
+**Phase 2: Discovery.** Pipelines 1a, 1b, 1c with "Run now" and scheduled runs through Inngest.
+Done when: a run on 3 firms adds partners with honest email statuses and source URLs, with zero addresses lacking a source.
+
+**Phase 3: Gmail + Review / Manual modes.** OAuth connect, CV attachment, writer + critic, Gmail drafts, Review Queue.
+Done when: she approves a draft in the app, it arrives in a test inbox with the CV attached, and it appears in her Sent folder.
+
+**Phase 4: Auto mode + follow-ups.** Sequences, the configurable cadence engine and editor (6.3), reply detection, OOO handling, suppression, caps.
+Done when: a test thread with a reply exits the queue within 24 hours; a thread without one gets touch 2 on day 7 as a reply in the same thread; she can create a custom cadence (for example 5, 12, 30, stop) in the UI, and the preview matches the touches actually scheduled.
+
+**Phase 5: LinkedIn assisted queue.**
+Done when: she can process 10 LinkedIn contacts end to end in under 10 minutes on her phone.
+
+**Phase 6: Hardening + hand-off.** Error states, token-refresh failures surfaced in the UI, a daily digest email to her, a short README for Rasleen.
+
+## 12. Environment variables
+
+```
+DATABASE_URL=
+AUTH_SECRET=
+AUTH_GOOGLE_ID=
+AUTH_GOOGLE_SECRET=
+ALLOWED_EMAILS=            # comma-separated, Aditya + Rasleen
+TOKEN_ENCRYPTION_KEY=      # 32-byte base64
+ANTHROPIC_API_KEY=
+EXA_API_KEY=               # and/or SERPAPI_API_KEY
+FIRECRAWL_API_KEY=
+HUNTER_API_KEY=
+INNGEST_EVENT_KEY=
+INNGEST_SIGNING_KEY=
+BLOB_READ_WRITE_TOKEN=
+```
+
+## 13. Repo layout
+
+```
+/app                      Next.js routes and UI
+/lib/db                   Drizzle schema + migrations
+/lib/integrations         gmail.ts, hunter.ts, exa.ts, firecrawl.ts, linkedin.ts (manual adapter only)
+/lib/pipelines            discover-firms.ts, discover-founders.ts, discover-opps.ts
+/lib/outreach             writer.ts, critic.ts, cadence.ts, sequences.ts, reply-detect.ts
+/lib/excel                import.ts, export.ts, merge.ts
+/inngest                  functions and schedules
+/prompts                  scout.md, enricher.md, verifier.md, warm-matcher.md, writer.md, critic.md
+/config                   firms.yml, sources.yml   (user layer)
+/profile                  inventory.md, voice/     (user layer)
+/seed                     Outreach-Desk.xlsx       (user layer)
+/.claude/agents           dev-time subagents
+/tests
+```
+
+## 14. Open questions for Aditya
+
+1. Which Gmail account sends: her RGNUL address or a personal Gmail? (See section 7.)
+2. Monthly budget for Exa / Firecrawl / Hunter / Anthropic API? This decides how wide discovery runs.
+3. Which cadence preset should be the default for firms vs founders? (All are editable in Settings.)
+4. Should Aditya see her replies, or only pipeline status? (Privacy between the two users.)
+5. Is the weekly radar that currently writes to the claude.ai prototype being retired once Phase 2 ships?
+6. Make this GitHub repo private? Until then, rule 7 keeps personal data out of it.

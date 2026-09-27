@@ -1,0 +1,9 @@
+node_modules/
+.next/
+.vercel/
+.env*
+!.env.example
+# user layer: personal data, never commit (see CLAUDE.md rule 7)
+/profile/
+/seed/
+*.xlsx
