@@ -23,7 +23,7 @@ Patterns borrowed from `santifer/career-ops` (open source, Claude Code based job
 |---|---|---|
 | Web discovery of firms, partners, associates, founders, opportunities | Yes | Search APIs + page extraction + Claude for structuring |
 | Work emails of partners/associates | Mostly | Firm profile pages first, then Hunter.io finder, then verified patterns. Some will stay unknown |
-| LinkedIn profile URLs | Yes | From search engine results (Exa / SerpAPI). Never by crawling linkedin.com |
+| LinkedIn profile URLs | Yes | From search API results (free-tier provider). Never by crawling linkedin.com |
 | Warm-lead flagging (worked with / alumni) | Yes | "Worked with" from `inventory.md`; alumni from search snippets, marked unverified until confirmed |
 | Send emails from her Gmail with CV attached | Yes | Gmail API over OAuth |
 | Draft-for-review mode | Yes | Gmail drafts + an in-app review queue |
@@ -36,7 +36,7 @@ Patterns borrowed from `santifer/career-ops` (open source, Claude Code based job
 2. **Never scrape or automate linkedin.com.** No headless browsers against LinkedIn, no cookie-session libraries. LinkedIn URLs come only from search APIs or manual entry.
 3. **Never fabricate experience.** Every claim in a generated message must trace to a line in `profile/inventory.md`. The writer stores which inventory items it used on the touch record. The critic rejects drafts with ungrounded claims.
 4. **Auto-send is off by default.** Per-contact opt-in. The first 10 messages ever sent go through the review queue regardless of setting.
-5. **Send caps.** Max 25 emails/day, max 1 message per person per 72 hours, Monday to Friday only, 09:30 to 18:00 in the recipient's timezone (default IST).
+5. **Send caps.** Max 25 emails/day, max 1 message per person per 72 hours, Monday to Friday only. **Default send time is 10:00 IST**, configurable in Settings. A day's batch is spread across a window starting at the send time (default 10:00 to 11:30) with random 2 to 6 minute gaps, so she never sends 25 emails in the same second. A touch that falls on a weekend moves to Monday at the send time.
 6. **Suppression is permanent.** Anyone who replies "no", unsubscribes, or bounces hard goes to the suppression list and is never contacted again by any path.
 7. **User layer vs system layer.** Personal data (`profile/`, `seed/`, DB rows) is never overwritten by code changes. Customisations go to the user layer, never into shared code.
    **This GitHub repo is public.** `profile/` and `seed/` are gitignored and must never be committed. They hold her phone number, email, CV facts and contacts. In production the inventory, CV and seed live in the DB and Vercel Blob and are uploaded through Settings. Locally, keep them in the gitignored folders. Commit only `profile.example/` with fake data for tests.
@@ -49,13 +49,14 @@ Patterns borrowed from `santifer/career-ops` (open source, Claude Code based job
 | App | Next.js (App Router, TypeScript) | Native to Vercel |
 | DB | Postgres (Neon or Supabase) + Drizzle ORM | Relational data, easy migrations |
 | Auth | Auth.js with Google provider, email allowlist of 2 | Same Google login also grants Gmail scopes |
-| Background jobs + schedules | Inngest (or Trigger.dev) | Vercel functions time out on long crawls; Vercel Cron on Hobby only fires once a day. Inngest gives retries, steps, and delayed follow-ups |
-| LLM | Anthropic TypeScript SDK | Sonnet-class model for drafting, Haiku-class for extraction and classification |
-| Web search | Exa (people + company search) and/or SerpAPI | Finds LinkedIn URLs and pages without touching LinkedIn |
-| Page extraction | Firecrawl API (self-host alternative: Crawl4AI) | Turns firm team pages and job boards into clean markdown |
-| Email finding + verification | Hunter.io (Domain Search, Email Finder, Email Verifier) | Has a small free tier; verification protects her sender reputation |
+| Background jobs + schedules | Inngest (free tier) | Vercel functions time out on long crawls; Vercel Cron on Hobby only fires once a day. Inngest gives retries, steps, and delayed follow-ups |
+| LLM | Vercel AI SDK (`ai`) with the OpenAI provider by default | Aditya already has OpenAI keys. The SDK keeps the provider swappable (Anthropic, Gemini free tier) through `LLM_PROVIDER`. Model names come from env (`LLM_MODEL_DRAFT`, `LLM_MODEL_FAST`), never hard-coded: a stronger model for writer/critic, a cheap small one for scout/enricher/classification |
+| Web search | Pluggable `SearchProvider`; start on a free tier (Tavily, Brave Search, or Exa, whichever still has a usable free quota when built) | Finds LinkedIn URLs and pages without touching LinkedIn. Cache every query result in the DB so re-runs cost nothing |
+| Page extraction | Plain `fetch` + `@mozilla/readability` + `turndown`, run in a Vercel function (free). Fallback: Jina Reader free tier for JS-heavy pages | Turns firm team pages and job boards into markdown without a paid crawler |
+| Email finding + verification | Firm pages first (free), then the firm's email pattern learned from confirmed addresses, plus a DNS MX check (free). Hunter.io free tier only for high-value contacts (warm leads, partners) | Keeps it free. `pattern` addresses stay draft-only (rule 1), so no paid verifier is needed to stay safe |
 | Excel | exceljs | Import, merge, export the 3-sheet workbook |
 | File storage | Vercel Blob | Her CV PDF and versions |
+| Hosting / DB cost | Vercel Hobby + Neon free tier + Inngest free tier | Everything except the LLM is free. The LLM (OpenAI) should cost a few dollars a month at 25 emails/day. The Settings page shows month-to-date LLM token usage and a soft monthly cap (`LLM_MONTHLY_BUDGET_USD`) that pauses discovery (never replies) when hit |
 | Email sending | Gmail API (`googleapis`) | Sends as her, lands in her Sent folder, threads correctly |
 | Tests | Vitest (unit), Playwright (e2e) | |
 
@@ -69,7 +70,9 @@ Patterns borrowed from `santifer/career-ops` (open source, Claude Code based job
 
 **opportunities**: id, title, org_id or org_name, type (`internship | vacation_scheme | scholarship | fellowship | invitation_programme | job | clerkship`), arena, location, deadline (real date or null), deadline_text, url, source, note, first_seen_at, archived.
 
-**sequences**: id, person_id, mode (`auto | review | manual`), status (`active | replied | exhausted | stopped | suppressed`), started_at, next_touch_at, touch_count.
+**sender_accounts**: id, user_id, email, display_name, signature, encrypted_refresh_token, daily_cap, is_default, status (`connected | needs_reconnect | removed`), connected_at.
+
+**sequences**: id, person_id, sender_account_id, mode (`auto | review | manual`), status (`active | replied | exhausted | stopped | suppressed`), started_at, next_touch_at, touch_count.
 
 **touches**: id, sequence_id, channel (`email | linkedin`), kind (`first | follow_up`), n, scheduled_for, status (`scheduled | drafted | awaiting_review | sent | skipped | failed`), subject, body, inventory_refs[], gmail_draft_id, gmail_message_id, gmail_thread_id, sent_at.
 
@@ -92,7 +95,7 @@ Three pipelines, each runnable on demand ("Run now") and on a schedule (daily fo
 **1a. TMT law firms (India first).**
 - Seed firm list lives in `config/firms.yml` (user layer). Start with: Trilegal, Nishith Desai Associates, JSA, Shardul Amarchand Mangaldas, Cyril Amarchand Mangaldas, AZB & Partners, Khaitan & Co, IndusLaw, Ikigai Law, Saraf and Partners, Spice Route Legal, Lakshmikumaran & Sridharan, Saikrishna & Associates, Anand and Anand, Economic Laws Practice, S&R Associates, Samvad Partners, Argus Partners.
 - For each firm: find the TMT / technology / data protection / telecom / fintech practice page, extract partners, counsel and senior associates with role and profile URL.
-- Emails: (1) firm profile page, (2) Hunter Email Finder, (3) firm pattern from confirmed addresses, then Hunter Email Verifier. Record status honestly.
+- Emails: (1) firm profile page, (2) firm pattern from confirmed addresses + DNS MX check, (3) Hunter free tier for warm leads and partners only. Record status honestly.
 - LinkedIn: search-API query like `"<name>" "<firm>" site:linkedin.com/in`. Store the URL only if name and firm both match the snippet.
 - Warm leads:
   - `worked_with`: anyone listed under "People she has worked with" in `profile/inventory.md`, plus anyone on those same teams she names later.
@@ -172,7 +175,12 @@ Three modes, chosen per contact or per batch from the roster (multi-select):
 - Google Cloud project setup for two users:
   - An app in "Testing" status expires refresh tokens after 7 days, so she would re-login weekly.
   - Moving it to "In production" without verification works for a small number of users but shows an "unverified app" warning at login. Acceptable for a private 2-person tool. Full verification (and a security assessment for restricted scopes) is only needed if this ever goes public.
-- **Open question:** is `rgnul.ac.in` on Google Workspace? If so, the university admin may block third-party OAuth apps. Fallback: send from a personal Gmail with her university address in the signature.
+- **Sender accounts are configurable (decided).** She can connect as many Gmail / Google Workspace accounts as she wants, and disconnect them, from Settings → Sending accounts ("+ Add Gmail" runs the OAuth flow again for another account). Each account has its own signature and daily cap. One is the default. She can choose a different one per batch or per contact in the "Start outreach" sheet.
+  - A sequence is **pinned to the account that sent its first email**. Follow-ups must come from the same account to stay in the same thread, so the sender can't be changed mid-sequence. Disconnecting an account pauses its active sequences and shows "Reconnect or stop N sequences".
+  - The 25/day cap applies per account and also as a global total (both configurable).
+  - Reply detection runs over every connected account.
+  - If `rgnul.ac.in` blocks third-party apps, connecting it just fails with a clear message and she uses a personal Gmail instead. No code change needed.
+- Login (Auth.js) and sending accounts are separate. She logs in with one Google account, and sending accounts are linked Gmail connections stored in `sender_accounts`.
 - Store refresh tokens encrypted at rest (AES-GCM with a key in env).
 - Respect Gmail sending limits; our own cap (25/day) is far below them.
 - Every sent email includes a short opt-out line in the signature ("If you'd rather I didn't follow up, just reply and say so.").
@@ -185,7 +193,7 @@ Three modes, chosen per contact or per batch from the roster (multi-select):
 
 ## 9. Agents
 
-The deployed app cannot run Claude Code. At runtime, each pipeline stage is plain TypeScript that calls the Claude API with a stage-specific system prompt. Keep those prompts in `prompts/*.md` so they are versioned and testable.
+The deployed app cannot run Claude Code. At runtime, each pipeline stage is plain TypeScript that calls the configured LLM (OpenAI by default, via the Vercel AI SDK) with a stage-specific system prompt. Use structured output (zod schemas) for every stage so results are typed. Keep those prompts in `prompts/*.md` so they are versioned and testable.
 
 **Runtime stages (prompts in `prompts/`):**
 
@@ -200,7 +208,7 @@ The deployed app cannot run Claude Code. At runtime, each pipeline stage is plai
 
 **Dev-time Claude Code subagents (`.claude/agents/`):**
 - `architect`: plans each phase against this file before code is written.
-- `integration-engineer`: Gmail, Inngest, Hunter, Exa, Firecrawl clients with mocks.
+- `integration-engineer`: Gmail (multi-account), Inngest, LLM, search, extraction and Hunter clients with mocks.
 - `test-writer`: cadence math, dedupe, status transitions, Gmail threading.
 - `security-reviewer`: OAuth token handling, allowlist, secrets, rule 2 compliance.
 - `copy-reviewer`: reads sample drafts against `inventory.md` and rules 3 and 5.
@@ -273,10 +281,15 @@ AUTH_GOOGLE_ID=
 AUTH_GOOGLE_SECRET=
 ALLOWED_EMAILS=            # comma-separated, Aditya + Rasleen
 TOKEN_ENCRYPTION_KEY=      # 32-byte base64
-ANTHROPIC_API_KEY=
-EXA_API_KEY=               # and/or SERPAPI_API_KEY
-FIRECRAWL_API_KEY=
-HUNTER_API_KEY=
+LLM_PROVIDER=openai        # openai | anthropic | google
+OPENAI_API_KEY=
+LLM_MODEL_DRAFT=           # stronger model for writer + critic
+LLM_MODEL_FAST=            # cheap model for scout, enricher, classification
+LLM_MONTHLY_BUDGET_USD=5
+SEARCH_PROVIDER=tavily     # tavily | brave | exa
+SEARCH_API_KEY=
+JINA_API_KEY=              # optional
+HUNTER_API_KEY=            # optional, free tier
 INNGEST_EVENT_KEY=
 INNGEST_SIGNING_KEY=
 BLOB_READ_WRITE_TOKEN=
@@ -287,7 +300,7 @@ BLOB_READ_WRITE_TOKEN=
 ```
 /app                      Next.js routes and UI
 /lib/db                   Drizzle schema + migrations
-/lib/integrations         gmail.ts, hunter.ts, exa.ts, firecrawl.ts, linkedin.ts (manual adapter only)
+/lib/integrations         gmail.ts, llm.ts, search.ts (providers behind one interface), extract.ts, email-finder.ts, hunter.ts, linkedin.ts (manual adapter only)
 /lib/pipelines            discover-firms.ts, discover-founders.ts, discover-opps.ts
 /lib/outreach             writer.ts, critic.ts, cadence.ts, sequences.ts, reply-detect.ts
 /lib/excel                import.ts, export.ts, merge.ts
@@ -300,11 +313,14 @@ BLOB_READ_WRITE_TOKEN=
 /tests
 ```
 
-## 14. Open questions for Aditya
+## 14. Decisions (answered by Aditya, 2026-09-27)
 
-1. Which Gmail account sends: her RGNUL address or a personal Gmail? (See section 7.)
-2. Monthly budget for Exa / Firecrawl / Hunter / Anthropic API? This decides how wide discovery runs.
-3. Which cadence preset should be the default for firms vs founders? (All are editable in Settings.)
-4. Should Aditya see her replies, or only pipeline status? (Privacy between the two users.)
-5. Is the weekly radar that currently writes to the claude.ai prototype being retired once Phase 2 ships?
-6. Make this GitHub repo private? Until then, rule 7 keeps personal data out of it.
+1. **Sending account:** configurable. She can add and remove any number of Gmail accounts (section 7).
+2. **Budget:** as close to free as possible. Use free tiers everywhere and his existing OpenAI keys for the LLM (section 4).
+3. **Send time:** 10:00 IST by default, configurable (rule 5). Default cadence for both arenas: Standard. She can change either in Settings.
+4. **Privacy between users:** not a concern. Both users see everything, so there is no per-user visibility layer. Aditya's login acts as admin.
+5. **Repo visibility:** undecided. Recommendation: make it private (free on GitHub). Either way, rule 7 keeps personal data out of git.
+
+## 15. Still open
+
+1. Is the weekly radar that currently writes to the claude.ai prototype being retired once Phase 2 ships?
